@@ -9,6 +9,8 @@ using Microsoft.Win32.SafeHandles;
 using System.Threading;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Cryptography;
+using System.Security.Cryptography.Pkcs;
+using System.Text;
 
 namespace WebCertificates
 {
@@ -158,9 +160,43 @@ namespace WebCertificates
 
             // Retrieve our cert in base64 with the entire cert chain included
             // We need the entire chain for this cert to work on Linux systems
-            strCert = CertRequest.GetCertificate(CR_OUT_BASE64HEADER | CR_OUT_CHAIN);
+            string Base64CertWithChain = CertRequest.GetCertificate(CR_OUT_BASE64HEADER | CR_OUT_CHAIN);
+
+            // The string which represents the certificate including the chain is still not useable for Linux systems
+            // Windows will not append each base64 block which represts a certificate with the correct decorations
+            // We must extract each certificate in the chain from the string
+
+            // Strip the string we have down to just the base64 code
+            string Base64CertWithChainParsed = Base64CertWithChain.Replace("-----BEGIN CERTIFICATE-----", "").Replace("-----END CERTIFICATE-----", "").Replace("\r", "").Replace("\n", "");
+
+            // Decode the base64 content and add it to a SignedCms which represents a collection of certificates
+            byte[] CertDecodedContent = Convert.FromBase64String(Base64CertWithChainParsed);
+
+            SignedCms CertContainer = new SignedCms();
+            CertContainer.Decode(CertDecodedContent);
+
+            StringBuilder CertificateTempString = new StringBuilder();
+
+            // Iterate over ever certificate in our SignedCms and export every one as base64 with correct decorations
+            foreach (var cert in CertContainer.Certificates)
+            {
+                CertificateTempString.Append(ConvertCertificateToBase64(cert));
+            }
+
+            strCert = CertificateTempString.ToString();
 
             return strCert;
+        }
+
+        private string ConvertCertificateToBase64(X509Certificate2 cert)
+        {
+            StringBuilder builder = new StringBuilder();
+
+            builder.AppendLine("-----BEGIN CERTIFICATE-----");
+            builder.AppendLine(Convert.ToBase64String(cert.Export(X509ContentType.Cert), Base64FormattingOptions.InsertLineBreaks));
+            builder.AppendLine("-----END CERTIFICATE-----");
+
+            return builder.ToString();
         }
 
         private X509Certificate2 FindCertificateInMachineStore(string SubjectDomain)
