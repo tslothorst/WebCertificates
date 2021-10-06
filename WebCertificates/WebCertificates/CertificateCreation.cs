@@ -11,11 +11,15 @@ using System.Security.Cryptography.X509Certificates;
 using System.Security.Cryptography;
 using System.Security.Cryptography.Pkcs;
 using System.Text;
+using System.IO;
+using System.Linq;
 
 namespace WebCertificates
 {
     public class CertificateCreation
     {
+        private const int MaximumLineLength = 64;
+
         // These values will be needed for our certificate enrollment process
         private const int CC_DEFAULTCONFIG = 0;
         private const int CC_UIPICKCONFIG = 0x1;
@@ -91,13 +95,19 @@ namespace WebCertificates
             PrivateKey.KeyUsage = X509PrivateKeyUsageFlags.XCN_NCRYPT_ALLOW_ALL_USAGES;
             PrivateKey.MachineContext = true;
             PrivateKey.CspInformations = CSPs;
-            PrivateKey.ExportPolicy = X509PrivateKeyExportFlags.XCN_NCRYPT_ALLOW_EXPORT_FLAG;
+            PrivateKey.ExportPolicy = X509PrivateKeyExportFlags.XCN_NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG;
             PrivateKey.ProviderType = X509ProviderType.XCN_PROV_RSA_SCHANNEL;
 
             PrivateKey.Create();
 
-            // Write our private key as base64 to our model so we can use it later
-            model.Privatekey = PrivateKey.Export("PRIVATEBLOB", EncodingType.XCN_CRYPT_STRING_BASE64HEADER);
+            // Convert the private key to PEM format and write our private key to our model so we can use it later
+            // We have to extract our private key at this stage because afterwards .NET makes it too complicated
+            // Also see: https://www.pkisolutions.com/accessing-and-using-certificate-private-keys-in-net-framework-net-core/
+            string privatkeyBase64Blob = PrivateKey.Export("PRIVATEBLOB", EncodingType.XCN_CRYPT_STRING_BASE64);
+
+            byte[] privatekeyExported = ExportPrivateKey(privatkeyBase64Blob);
+
+            model.Privatekey = PemEncode(privatekeyExported);
 
             // Initialize the PKCS#10 certificate request object based on the private key
             // Set the context to machine so this cert will work with the computer certificate store
@@ -144,7 +154,7 @@ namespace WebCertificates
                 {
                     if (certWaitCount > CertIntervalAttempts)
                     {
-                        throw new CertificateRequestTimeoutException("The submission timed out: " + strDisposition + " Last status: " + CertRequest.GetLastStatus().ToString());
+                        throw new CertificateRequestTimeoutException($"The submission timed out: {strDisposition} Last status: {CertRequest.GetLastStatus().ToString()}");
                     }
                     ++certWaitCount;
                     Thread.Sleep(CertIntervalSleep);
@@ -153,7 +163,7 @@ namespace WebCertificates
 
                 else // Our request has failed
                 {
-                    throw new CertificateRequestFailedException("The submission failed: " + strDisposition + " Last status: " + CertRequest.GetLastStatus().ToString());
+                    throw new CertificateRequestFailedException($"The submission failed: {strDisposition} Last status: {CertRequest.GetLastStatus().ToString()}");
                 }
 
             }
@@ -197,6 +207,93 @@ namespace WebCertificates
             builder.AppendLine("-----END CERTIFICATE-----");
 
             return builder.ToString();
+        }
+
+        // Adapted from https://stackoverflow.com/a/40306616
+        private byte[] ExportPrivateKey(String cspBase64Blob)
+        {
+            if (String.IsNullOrEmpty(cspBase64Blob) == true)
+                throw new ArgumentNullException(nameof(cspBase64Blob));
+
+            RSACryptoServiceProvider csp = new RSACryptoServiceProvider();
+
+            csp.ImportCspBlob(Convert.FromBase64String(cspBase64Blob));
+
+            if (csp.PublicOnly)
+                throw new ArgumentException("CSP does not contain a private key!", nameof(csp));
+
+            RSAParameters parameters = csp.ExportParameters(true);
+
+            List<byte[]> list = new List<byte[]>
+      {
+         new byte[] {0x00},
+         parameters.Modulus,
+         parameters.Exponent,
+         parameters.D,
+         parameters.P,
+         parameters.Q,
+         parameters.DP,
+         parameters.DQ,
+         parameters.InverseQ
+      };
+
+            return SerializeList(list);
+        }
+
+        // Adapted from https://stackoverflow.com/a/40306616
+        private byte[] Encode(byte[] inBytes, bool useTypeOctet = true)
+        {
+            int length = inBytes.Length;
+            List<byte> bytes = new List<byte>();
+
+            if (useTypeOctet == true)
+                bytes.Add(0x02); // INTEGER
+
+            bytes.Add(0x84); // Long format, 4 bytes
+            bytes.AddRange(BitConverter.GetBytes(length).Reverse());
+            bytes.AddRange(inBytes);
+
+            return bytes.ToArray();
+        }
+
+        // Adapted from https://stackoverflow.com/a/40306616
+        private String PemEncode(byte[] bytes)
+        {
+            if (bytes == null)
+                throw new ArgumentNullException(nameof(bytes));
+
+            string base64 = Convert.ToBase64String(bytes);
+
+            StringBuilder b = new StringBuilder();
+            b.AppendLine("-----BEGIN RSA PRIVATE KEY-----");
+
+            for (int i = 0; i < base64.Length; i += MaximumLineLength)
+                b.AppendLine($"{ base64.Substring(i, Math.Min(MaximumLineLength, base64.Length - i)) }");
+
+            b.AppendLine("-----END RSA PRIVATE KEY-----");
+
+            return b.ToString();
+        }
+
+        // Adapted from https://stackoverflow.com/a/40306616
+        private byte[] SerializeList(List<byte[]> list)
+        {
+            if (list == null)
+                throw new ArgumentNullException(nameof(list));
+
+            byte[] keyBytes = list.Select(e => Encode(e)).SelectMany(e => e).ToArray();
+
+            BinaryWriter binaryWriter = new BinaryWriter(new MemoryStream());
+            binaryWriter.Write((byte)0x30); // SEQUENCE
+            binaryWriter.Write(Encode(keyBytes, false));
+            binaryWriter.Flush();
+
+            byte[] result = ((MemoryStream)binaryWriter.BaseStream).ToArray();
+
+            binaryWriter.BaseStream.Dispose();
+            binaryWriter.Dispose();
+
+            return result;
         }
 
         private X509Certificate2 FindCertificateInMachineStore(string SubjectDomain)
