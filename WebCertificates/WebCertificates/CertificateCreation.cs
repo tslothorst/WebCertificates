@@ -77,6 +77,9 @@ namespace WebCertificates
             CCspInformation CSP = new CCspInformation();
             CCspInformations CSPs = new CCspInformations();
             CX500DistinguishedName DN = new CX500DistinguishedName();
+            CAlternativeName alternativeName = new CAlternativeName();
+            CAlternativeNames SANs = new CAlternativeNames();
+            CX509ExtensionAlternativeNames SANsCollection = new CX509ExtensionAlternativeNames();
             CX509Enrollment Enroll = new CX509Enrollment();
             CObjectIds ObjectIds = new CObjectIds();
             CObjectId ObjectId = new CObjectId();
@@ -119,6 +122,14 @@ namespace WebCertificates
             // and add it to our request
             DN.Encode("CN=" + subject.Trim(), X500NameFlags.XCN_CERT_NAME_STR_NONE);
             Pkcs10.Subject = DN;
+
+            // Some browsers like Chrome will not accept certificates with no DNS Alternative Name set
+            // We take the subject name and add it in the certificate extensions in our request as DNS Name
+            alternativeName.InitializeFromString(AlternativeNameType.XCN_CERT_ALT_NAME_DNS_NAME, subject.Trim());
+            SANs.Add(alternativeName);
+            SANsCollection.InitializeEncode(SANs);
+
+            Pkcs10.X509Extensions.Add((CX509Extension)SANsCollection);
 
             // Create our enrollment request and transform it to a string
             Enroll.InitializeFromRequest(Pkcs10);
